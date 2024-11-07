@@ -21,6 +21,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+#include <iostream>
 #include <vector>
 #include <string>
 #include <queue>
@@ -28,20 +31,218 @@ SOFTWARE.
 #include "kdtree.h"
 #include "utility.h"
 #include "PoissonRecon.h"
+#include <fstream> 
+#include <string> 
+#include <sstream>
+
+#include "Camera.h"
 
 using namespace std;
 
-void ipsr(const string &input_name, const string &output_name, int iters, double pointweight, int depth, int k_neighbors)
+const unsigned int SCR_WIDTH = 800;
+const unsigned int SCR_HEIGHT = 600;
+std::string vertex_shader_source = readFile("Src/Shader/point_cloud.vert");
+std::string fragment_shader_source = readFile("Src/Shader/point_cloud.frag");
+
+Camera camera(glm::vec3(0.0f, 0.0f, 0.0f));
+float deltaTime = 0.0f;
+float lastFrame = 0.0f;
+bool firstMouse = true;
+float lastX = SCR_WIDTH / 2.0f;
+float lastY = SCR_HEIGHT / 2.0f;
+
+void initOpenGL(GLFWwindow*& window) {
+	if (!glfwInit()) {
+		std::cerr << "Failed to initialize GLFW" << std::endl;
+		exit(-1);
+	}
+	window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "iPSR Render Approach", NULL, NULL);
+	if (!window) {
+		std::cerr << "Failed to create GLFW window" << std::endl;
+		glfwTerminate();
+		exit(-1);
+	}
+	glfwMakeContextCurrent(window);
+	if (glewInit() != GLEW_OK) {
+		std::cerr << "Failed to initialize GLEW" << std::endl;
+		exit(-1);
+	}
+}
+
+void checkOpenGLError(const std::string& context) {
+	GLenum err;
+	while ((err = glGetError()) != GL_NO_ERROR) {
+		std::cerr << "OpenGL error in " << context << ": " << err << std::endl;
+	}
+}
+
+std::string readFile(const std::string& shader_type)
+{
+	std::ifstream shader_file(shader_type);
+	std::stringstream file_content;
+
+	if (shader_file.is_open())
+	{
+		file_content << shader_file.rdbuf();
+		shader_file.close();
+	}
+	else
+	{
+		std::cerr << "Could not open the file: " << shader_type << std::endl;
+	}
+
+	return file_content.str();
+}
+
+GLuint createShaders(const char* vertex_shader_source, const char* fragment_shader_source)
+{
+	GLuint vshader = glCreateShader(GL_VERTEX_SHADER);
+	glShaderSource(vshader, 1, &vertex_shader_source, NULL);
+	glCompileShader(vshader);
+
+	GLuint fshader = glCreateShader(GL_FRAGMENT_SHADER);
+	glShaderSource(fshader, 1, &fragment_shader_source, NULL);
+	glCompileShader(fshader);
+
+
+	GLuint program = glCreateProgram();
+	glAttachShader(program, vshader);
+	glAttachShader(program, fshader);
+	glLinkProgram(program);
+
+	GLint program_linked;
+	glGetProgramiv(program, GL_LINK_STATUS, &program_linked);
+	if (program_linked != GL_TRUE)
+	{
+		GLsizei log_length = 0;
+		GLchar message[1024];
+		glGetProgramInfoLog(program, 1024, &log_length, message);
+	}
+
+	glDeleteShader(vshader);
+	glDeleteShader(fshader);
+
+	return program;
+
+}
+
+GLuint setupBuffers(std::vector<float> flatCoords) {
+	GLuint VBO, VAO;
+	glGenVertexArrays(1, &VAO);
+	glGenBuffers(1, &VBO);
+
+	glBindVertexArray(VAO);
+	glBindBuffer(GL_ARRAY_BUFFER, VBO);
+	glBufferData(GL_ARRAY_BUFFER, flatCoords.size() * sizeof(float), &flatCoords[0], GL_STATIC_DRAW);
+
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+	glEnableVertexAttribArray(0);
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+
+	return VAO;
+}
+
+void processInput(GLFWwindow* window)
+{
+	if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+		camera.ProcessKeyboard(FORWARD, deltaTime);
+	if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+		camera.ProcessKeyboard(BACKWARD, deltaTime);
+	if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+		camera.ProcessKeyboard(LEFT, deltaTime);
+	if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+		camera.ProcessKeyboard(RIGHT, deltaTime);
+}
+
+void mouse_callback(GLFWwindow* window, double xposIn, double yposIn)
+{
+	float xpos = static_cast<float>(xposIn);
+	float ypos = static_cast<float>(yposIn);
+
+	if (firstMouse)
+	{
+		lastX = xpos;
+		lastY = ypos;
+		firstMouse = false;
+	}
+
+	float xoffset = xpos - lastX;
+	float yoffset = lastY - ypos;
+
+	lastX = xpos;
+	lastY = ypos;
+
+	camera.ProcessMouseMovement(xoffset, yoffset);
+}
+
+void renderScene(const std::vector<Point<double, 3>>& point_cloud_positions)
+{
+
+	std::vector<float> flatCoords;
+	flatCoords.reserve(point_cloud_positions.size() * 3); // 3 floats per point (x, y, z)
+
+	for (const auto& point : point_cloud_positions) {
+		flatCoords.push_back(static_cast<float>(point[0])); // x
+		flatCoords.push_back(static_cast<float>(point[1])); // y
+		flatCoords.push_back(static_cast<float>(point[2])); // z
+	}
+
+	GLFWwindow* window;
+	initOpenGL(window);
+	GLuint VAO = setupBuffers(flatCoords);
+	GLuint program = createShaders(vertex_shader_source.c_str(), fragment_shader_source.c_str());
+
+	glEnable(GL_DEPTH_TEST);
+	glfwSetCursorPosCallback(window, mouse_callback);
+
+
+	while (!glfwWindowShouldClose(window)) {
+
+		float currentFrame = glfwGetTime();
+		deltaTime = currentFrame - lastFrame;
+		lastFrame = currentFrame;
+
+		processInput(window);
+
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+		glUseProgram(program);
+
+		glm::mat4 view = camera.GetViewMatrix();
+		glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
+		glUniformMatrix4fv(glGetUniformLocation(program, "view"), 1, GL_FALSE, glm::value_ptr(view));
+		glUniformMatrix4fv(glGetUniformLocation(program, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+
+
+		glBindVertexArray(VAO);
+		glDrawArrays(GL_POINTS, 0, flatCoords.size() / 3);
+		glBindVertexArray(0);
+
+		glfwSwapBuffers(window);
+		glfwPollEvents();
+	}
+
+	glDeleteProgram(program);
+	glDeleteVertexArrays(1, &VAO);
+
+	glfwTerminate();
+}
+
+void ipsr(const string& input_name, const string& output_name, int iters, double pointweight, int depth, int k_neighbors)
 {
 	typedef double REAL;
 	const unsigned int DIM = 3U;
 
 	vector<pair<Point<REAL, DIM>, Normal<REAL, DIM>>> points_normals;
 	ply_reader<REAL, DIM>(input_name, points_normals);
+	std::vector<Point<REAL, DIM>> point_cloud_positions;
 
 	string command = "PoissonRecon --in i.ply --out o.ply --bType 2 --depth " + to_string(depth) + " --pointWeight " + to_string(pointweight);
 	vector<string> cmd = split(command);
-	vector<char *> argv_str(cmd.size());
+	vector<char*> argv_str(cmd.size());
 	for (size_t i = 0; i < cmd.size(); ++i)
 		argv_str[i] = &cmd[i][0];
 
@@ -51,10 +252,24 @@ void ipsr(const string &input_name, const string &output_name, int iters, double
 	points_normals = sample_points<REAL, DIM>((int)argv_str.size(), argv_str.data(), points_normals, iXForm, &weight_samples);
 
 	// initialize normals randomly
+	// iterate over all points in point cloud, and set its normal to random values (x,y,z)
+	// be sure not to use normals with length 0
+	// normalize vector in the end
+
+	// Process points to extract their positions
+	for (size_t i = 0; i < points_normals.size(); i++) {
+		point_cloud_positions.push_back(points_normals[i].first);
+	}
+
+	// Pass the point positions for rendering
+	renderScene(point_cloud_positions);
+
+
 	printf("random initialization...\n");
 	Normal<REAL, DIM> zero_normal(Point<REAL, DIM>(0, 0, 0));
 	srand(0);
 	for (size_t i = 0; i < points_normals.size(); ++i)
+
 	{
 		do
 		{
@@ -70,7 +285,7 @@ void ipsr(const string &input_name, const string &output_name, int iters, double
 		vertices.reserve(points_normals.size());
 		for (size_t i = 0; i < points_normals.size(); ++i)
 		{
-			array<double, 3> p{points_normals[i].first[0], points_normals[i].first[1], points_normals[i].first[2]};
+			array<double, 3> p{ points_normals[i].first[0], points_normals[i].first[1], points_normals[i].first[2] };
 			vertices.push_back(kdt::KDTreePoint(p));
 		}
 		tree.build(vertices);
@@ -102,7 +317,7 @@ void ipsr(const string &input_name, const string &output_name, int iters, double
 			{
 				Point<REAL, DIM> c = mesh.first[mesh.second[i][0]] + mesh.first[mesh.second[i][1]] + mesh.first[mesh.second[i][2]];
 				c /= 3;
-				array<REAL, DIM> a{c[0], c[1], c[2]};
+				array<REAL, DIM> a{ c[0], c[1], c[2] };
 				nearestSamples[i] = tree.knnSearch(kdt::KDTreePoint(a), k_neighbors);
 				normals[i] = Point<REAL, DIM>::CrossProduct(mesh.first[mesh.second[i][1]] - mesh.first[mesh.second[i][0]], mesh.first[mesh.second[i][2]] - mesh.first[mesh.second[i][0]]);
 			}
@@ -164,13 +379,19 @@ void ipsr(const string &input_name, const string &output_name, int iters, double
 	// output_all_points_and_normals<REAL, DIM>("points_normals_all.ply", input_name, points_normals, tree, iXForm);
 }
 
-int main(int argc, char *argv[])
-{
-	string input_name, output_name;
+int main(int argc, char* argv[]) {
+	// Hardcoded parameters for iPSR
+	std::string input_name = "data/bimba.ply";
+	std::string output_name = "data/bimba_test.ply";
 	int iters = 30;
-	double pointweight = 10;
+	double pointweight = 10.0;
 	int depth = 10;
 	int k_neighbors = 10;
+
+	// ----------------------------
+	// command line stuff from authors
+	// ----------------------------
+	/*
 	for (int i = 1; i < argc; i += 2)
 	{
 		if (strcmp(argv[i], "--in") == 0)
@@ -242,19 +463,9 @@ int main(int argc, char *argv[])
 			return 0;
 		}
 	}
+	*/
 
-	if (argc <= 1 || input_name.empty() || output_name.empty())
-	{
-		printf("Parameters:\n");
-		printf("--in                      input .ply model\n");
-		printf("--out                     output .ply model\n");
-		printf("--iters (optional)        maximum number of iterations, default 30\n");
-		printf("--pointWeight (optional)  screened weight of SPSR, default 10\n");
-		printf("--depth (optional)        maximum depth of the octree, default 10\n");
-		printf("--neighbors (optional)    number of the nearest neighbors to search, default 10\n");
-		return 0;
-	}
-
+	// Output settings for debugging
 	printf("Iterative Poisson Surface Reconstruction (iPSR)\n");
 	printf("Parameters:\n");
 	printf("--in          %s\n", input_name.c_str());
@@ -264,7 +475,11 @@ int main(int argc, char *argv[])
 	printf("--depth       %d\n", depth);
 	printf("--neighbors   %d\n\n", k_neighbors);
 
+	// Call ipsr function with hardcoded arguments
 	ipsr(input_name, output_name, iters, pointweight, depth, k_neighbors);
 
 	return 0;
 }
+
+
+

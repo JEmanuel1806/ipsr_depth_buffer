@@ -41,10 +41,9 @@ using namespace std;
 
 const unsigned int SCR_WIDTH = 800;
 const unsigned int SCR_HEIGHT = 600;
-std::string vertex_shader_source = readFile("Src/Shader/point_cloud.vert");
-std::string fragment_shader_source = readFile("Src/Shader/point_cloud.frag");
 
-Camera camera(glm::vec3(0.0f, 0.0f, 0.0f));
+
+Camera camera(glm::vec3(0.0f, 0.0f, 3.0f));
 float deltaTime = 0.0f;
 float lastFrame = 0.0f;
 bool firstMouse = true;
@@ -93,6 +92,9 @@ std::string readFile(const std::string& shader_type)
 
 	return file_content.str();
 }
+
+std::string vertex_shader_source = readFile("Src/Shader/point_cloud.vert");
+std::string fragment_shader_source = readFile("Src/Shader/point_cloud.frag");
 
 GLuint createShaders(const char* vertex_shader_source, const char* fragment_shader_source)
 {
@@ -144,6 +146,34 @@ GLuint setupBuffers(std::vector<float> flatCoords) {
 	return VAO;
 }
 
+void configureFBO(GLuint& depthtex, GLuint& framebuffer)
+{
+
+	glGenFramebuffers(1, &framebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+
+	glGenTextures(1, &depthtex);
+	glBindTexture(GL_TEXTURE_2D, depthtex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32, SCR_WIDTH, SCR_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthtex, 0);
+
+	glDrawBuffer(GL_NONE);
+	glReadBuffer(GL_NONE);
+
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+	{
+		printf("FBO incomplete!");
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0); 
+}
+
+
 void processInput(GLFWwindow* window)
 {
 	if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
@@ -181,7 +211,7 @@ void renderScene(const std::vector<Point<double, 3>>& point_cloud_positions)
 {
 
 	std::vector<float> flatCoords;
-	flatCoords.reserve(point_cloud_positions.size() * 3); // 3 floats per point (x, y, z)
+	flatCoords.reserve(point_cloud_positions.size() * 3); // x, y, z
 
 	for (const auto& point : point_cloud_positions) {
 		flatCoords.push_back(static_cast<float>(point[0])); // x
@@ -194,28 +224,44 @@ void renderScene(const std::vector<Point<double, 3>>& point_cloud_positions)
 	GLuint VAO = setupBuffers(flatCoords);
 	GLuint program = createShaders(vertex_shader_source.c_str(), fragment_shader_source.c_str());
 
+	GLuint FBO;
+	GLuint depthtex;
+
+	configureFBO(depthtex, FBO);
+
 	glEnable(GL_DEPTH_TEST);
 	glfwSetCursorPosCallback(window, mouse_callback);
 
 
 	while (!glfwWindowShouldClose(window)) {
-
 		float currentFrame = glfwGetTime();
 		deltaTime = currentFrame - lastFrame;
 		lastFrame = currentFrame;
 
 		processInput(window);
 
-		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glBindFramebuffer(GL_FRAMEBUFFER, FBO);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 		glUseProgram(program);
 
 		glm::mat4 view = camera.GetViewMatrix();
 		glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
+
 		glUniformMatrix4fv(glGetUniformLocation(program, "view"), 1, GL_FALSE, glm::value_ptr(view));
 		glUniformMatrix4fv(glGetUniformLocation(program, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
 
+		glBindVertexArray(VAO);
+		glDrawArrays(GL_POINTS, 0, flatCoords.size() / 3);
+		glBindVertexArray(0);
+
+		glBindFramebuffer(GL_FRAMEBUFFER, 0); 
+
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glUseProgram(program); 
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, depthtex);
+		glUniform1i(glGetUniformLocation(program, "depthTex"), 0);
 
 		glBindVertexArray(VAO);
 		glDrawArrays(GL_POINTS, 0, flatCoords.size() / 3);
@@ -475,7 +521,6 @@ int main(int argc, char* argv[]) {
 	printf("--depth       %d\n", depth);
 	printf("--neighbors   %d\n\n", k_neighbors);
 
-	// Call ipsr function with hardcoded arguments
 	ipsr(input_name, output_name, iters, pointweight, depth, k_neighbors);
 
 	return 0;

@@ -42,6 +42,17 @@ using namespace std;
 const unsigned int SCR_WIDTH = 800;
 const unsigned int SCR_HEIGHT = 600;
 
+float quadVertices[] = {
+	// positions   // texCoords
+	-1.0f, -1.0f,  0.0f, 0.0f,
+	 1.0f, -1.0f,  1.0f, 0.0f,
+	-1.0f,  1.0f,  0.0f, 1.0f,
+
+	-1.0f,  1.0f,  0.0f, 1.0f,
+	 1.0f, -1.0f,  1.0f, 0.0f,
+	 1.0f,  1.0f,  1.0f, 1.0f
+};
+
 
 Camera camera(glm::vec3(0.0f, 0.0f, 3.0f));
 float deltaTime = 0.0f;
@@ -93,8 +104,15 @@ std::string readFile(const std::string& shader_type)
 	return file_content.str();
 }
 
-std::string vertex_shader_source = readFile("Src/Shader/point_cloud.vert");
-std::string fragment_shader_source = readFile("Src/Shader/point_cloud.frag");
+std::string vertex_shader_source = readFile("Src/Shader/depth_pass.vert");
+std::string fragment_shader_source = readFile("Src/Shader/depth_pass.frag");
+
+std::string vertex_shader_screen = readFile("Src/Shader/normal_pass.vert");
+std::string fragment_shader_screen = readFile("Src/Shader/normal_pass.frag");
+
+std::string vertex_shader_normal = readFile("Src/Shader/visualize_normal.vert");
+std::string fragment_shader_normal = readFile("Src/Shader/visualize_normal.frag");
+
 
 GLuint createShaders(const char* vertex_shader_source, const char* fragment_shader_source)
 {
@@ -112,20 +130,10 @@ GLuint createShaders(const char* vertex_shader_source, const char* fragment_shad
 	glAttachShader(program, fshader);
 	glLinkProgram(program);
 
-	GLint program_linked;
-	glGetProgramiv(program, GL_LINK_STATUS, &program_linked);
-	if (program_linked != GL_TRUE)
-	{
-		GLsizei log_length = 0;
-		GLchar message[1024];
-		glGetProgramInfoLog(program, 1024, &log_length, message);
-	}
-
 	glDeleteShader(vshader);
 	glDeleteShader(fshader);
 
 	return program;
-
 }
 
 GLuint setupBuffers(std::vector<float> flatCoords) {
@@ -146,12 +154,36 @@ GLuint setupBuffers(std::vector<float> flatCoords) {
 	return VAO;
 }
 
-void configureFBO(GLuint& depthtex, GLuint& framebuffer)
+GLuint setupBufferVAO() {
+	GLuint quadVAO, quadVBO;
+	glGenVertexArrays(1, &quadVAO);
+	glGenBuffers(1, &quadVBO);
+
+	glBindVertexArray(quadVAO);
+	glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+	glEnableVertexAttribArray(0);
+
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+	glEnableVertexAttribArray(1);
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+
+	return quadVAO;
+
+}
+
+void configureFBO(GLuint& depthtex, GLuint& normalmap, GLuint& framebuffer)
 {
 
 	glGenFramebuffers(1, &framebuffer);
 	glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
 
+
+	// depth tex
 	glGenTextures(1, &depthtex);
 	glBindTexture(GL_TEXTURE_2D, depthtex);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32, SCR_WIDTH, SCR_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
@@ -159,20 +191,26 @@ void configureFBO(GLuint& depthtex, GLuint& framebuffer)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthtex, 0);
 
-	glDrawBuffer(GL_NONE);
-	glReadBuffer(GL_NONE);
+	// normal map
+	glGenTextures(1, &normalmap);
+	glBindTexture(GL_TEXTURE_2D, normalmap);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, SCR_WIDTH, SCR_HEIGHT, 0, GL_RGB, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, normalmap, 0);
+
+	GLenum attachments[1] = { GL_COLOR_ATTACHMENT0 };
+	glDrawBuffers(1, attachments);
+
+	glBindFramebuffer(GL_FRAMEBUFFER , 0);
 
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
 	{
 		printf("FBO incomplete!");
 	}
-
-	glBindFramebuffer(GL_FRAMEBUFFER, 0); 
 }
-
 
 void processInput(GLFWwindow* window)
 {
@@ -222,14 +260,23 @@ void renderScene(const std::vector<Point<double, 3>>& point_cloud_positions)
 	GLFWwindow* window;
 	initOpenGL(window);
 	GLuint VAO = setupBuffers(flatCoords);
-	GLuint program = createShaders(vertex_shader_source.c_str(), fragment_shader_source.c_str());
+	GLuint quadVAO = setupBufferVAO();
+	GLuint depth_program = createShaders(vertex_shader_source.c_str(), fragment_shader_source.c_str());
+	GLuint normal_program = createShaders(vertex_shader_screen.c_str(), fragment_shader_screen.c_str());
+	GLuint normal_visualize_program = createShaders(vertex_shader_normal.c_str(), fragment_shader_normal.c_str());
 
 	GLuint FBO;
-	GLuint depthtex;
+	GLuint depthTex;
+	GLuint normalTex;
 
-	configureFBO(depthtex, FBO);
 
-	glEnable(GL_DEPTH_TEST);
+	configureFBO(depthTex, normalTex, FBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, FBO);
+	
+	// Check currentFBO
+	GLint currentFB;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &currentFB);
+	std::cout << "Current framebuffer: " << currentFB << std::endl;
 	glfwSetCursorPosCallback(window, mouse_callback);
 
 
@@ -238,40 +285,66 @@ void renderScene(const std::vector<Point<double, 3>>& point_cloud_positions)
 		deltaTime = currentFrame - lastFrame;
 		lastFrame = currentFrame;
 
-		processInput(window);
-
+		// FIRST PASS (DEPTH TEX)
 		glBindFramebuffer(GL_FRAMEBUFFER, FBO);
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); 
+		glEnable(GL_DEPTH_TEST);
 
-		glUseProgram(program);
+		processInput(window);
+		glUseProgram(depth_program);
 
 		glm::mat4 view = camera.GetViewMatrix();
 		glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
 
-		glUniformMatrix4fv(glGetUniformLocation(program, "view"), 1, GL_FALSE, glm::value_ptr(view));
-		glUniformMatrix4fv(glGetUniformLocation(program, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+		glUniformMatrix4fv(glGetUniformLocation(depth_program, "view"), 1, GL_FALSE, glm::value_ptr(view));
+		glUniformMatrix4fv(glGetUniformLocation(depth_program, "proj"), 1, GL_FALSE, glm::value_ptr(projection));
 
 		glBindVertexArray(VAO);
 		glDrawArrays(GL_POINTS, 0, flatCoords.size() / 3);
 		glBindVertexArray(0);
 
-		glBindFramebuffer(GL_FRAMEBUFFER, 0); 
+		
+		// SECOND PASS (NORMAL TEX)
 
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-		glUseProgram(program); 
+		glBindFramebuffer(GL_FRAMEBUFFER, FBO);
+		glDisable(GL_DEPTH_TEST);
+
+		glUseProgram(normal_program); 
 		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D, depthtex);
-		glUniform1i(glGetUniformLocation(program, "depthTex"), 0);
+		glBindTexture(GL_TEXTURE_2D, depthTex); 
+		glUniform1i(glGetUniformLocation(normal_program, "depthTex"), 0);
+		glUniform2f(glGetUniformLocation(normal_program, "iResolution"), SCR_WIDTH, SCR_HEIGHT);
+		glUniformMatrix4fv(glGetUniformLocation(normal_program, "view"), 1, GL_FALSE, glm::value_ptr(view));
+		glUniformMatrix4fv(glGetUniformLocation(normal_program, "proj"), 1, GL_FALSE, glm::value_ptr(projection));
+		glUniformMatrix4fv(glGetUniformLocation(normal_program, "invProj"), 1, GL_FALSE, glm::value_ptr(glm::inverse(projection)));
 
-		glBindVertexArray(VAO);
-		glDrawArrays(GL_POINTS, 0, flatCoords.size() / 3);
+		glBindVertexArray(quadVAO);
+		glDrawArrays(GL_TRIANGLES, 0, 6);
+		glBindVertexArray(0);
+
+		// THIRD PASS (visualiuze for debugging)
+
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glDisable(GL_DEPTH_TEST);
+
+		glUseProgram(normal_visualize_program);
+
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, normalTex);
+		glUniform1i(glGetUniformLocation(normal_visualize_program, "normalTex"), 0);
+
+		glBindVertexArray(quadVAO);
+		glDrawArrays(GL_TRIANGLES, 0, 6);
 		glBindVertexArray(0);
 
 		glfwSwapBuffers(window);
 		glfwPollEvents();
+
+
 	}
 
-	glDeleteProgram(program);
+	glDeleteProgram(depth_program);
 	glDeleteVertexArrays(1, &VAO);
 
 	glfwTerminate();
@@ -310,7 +383,8 @@ void ipsr(const string& input_name, const string& output_name, int iters, double
 	// Pass the point positions for rendering
 	renderScene(point_cloud_positions);
 
-
+	// Use normals from normal texture instead of random normalization
+	/*
 	printf("random initialization...\n");
 	Normal<REAL, DIM> zero_normal(Point<REAL, DIM>(0, 0, 0));
 	srand(0);
@@ -323,6 +397,21 @@ void ipsr(const string& input_name, const string& output_name, int iters, double
 		} while (points_normals[i].second == zero_normal);
 		normalize<REAL, DIM>(points_normals[i].second);
 	}
+	*/
+
+	printf("Using normals from normal texture...");
+
+	for (size_t i = 0; i < points_normals.size(); ++i) {
+		{
+			if (i < point_cloud_normals.size()) {
+				points_normals[i].second = point_cloud_normals[i]; 
+			}
+			else {
+				points_normals[i].second = Point<REAL, DIM>(0, 0, 1); //default normal for no normal data
+			}
+		}
+	}
+	
 
 	// construct the Kd-Tree
 	kdt::KDTree<kdt::KDTreePoint> tree;
@@ -426,7 +515,7 @@ void ipsr(const string& input_name, const string& output_name, int iters, double
 }
 
 int main(int argc, char* argv[]) {
-	// Hardcoded parameters for iPSR
+	// Hardcoded parameters 
 	std::string input_name = "data/bimba.ply";
 	std::string output_name = "data/bimba_test.ply";
 	int iters = 30;

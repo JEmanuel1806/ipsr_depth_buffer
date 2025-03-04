@@ -17,5 +17,25 @@
     <ClCompile Include="Src\PlyFile.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Src\Camera.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Src\Shader\depth_pass.vert" />
+    <None Include="Src\Shader\depth_pass.frag" />
+    <None Include="Src\point_cloud.vert" />
+    <None Include="Src\point_cloud.frag" />
+    <None Include="Src\Shader\normal_pass.vert" />
+    <None Include="Src\Shader\normal_pass.frag" />
+    <None Include="Src\Shader\visualize_normal.vert" />
+    <None Include="Src\Shader\visualize_normal.frag" />
+    <None Include="C:\Users\Admin\Downloads\table.ply" />
+    <None Include="C:\Users\Admin\Downloads\apb_2nd_floor.ply" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Src\Camera.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
